@@ -1,0 +1,94 @@
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.1
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.1
+    depends_on: [zookeeper]
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,PLAINTEXT_HOST://0.0.0.0:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+
+  spark-master:
+    build: ./spark
+    ports:
+      - "8080:8080"
+      - "7077:7077"
+    command: ["bash", "-lc", "/opt/spark/sbin/start-master.sh; tail -f /dev/null"]
+    volumes:
+      - ./output:/opt/output
+      - ./checkpoints:/opt/checkpoints
+    environment:
+      SPARK_LOG_DIR: /opt/spark/logs
+      SPARK_WORKER_DIR: /opt/spark/work-dir
+
+  spark-worker:
+    build: ./spark
+    depends_on: [spark-master]
+    ports:
+      - "8081:8081"
+    command: ["bash", "-lc", "/opt/spark/sbin/start-worker.sh spark://spark-master:7077; tail -f /dev/null"]
+    volumes:
+      - ./output:/opt/output
+      - ./checkpoints:/opt/checkpoints
+    environment:
+      SPARK_LOG_DIR: /opt/spark/logs
+      SPARK_WORKER_DIR: /opt/spark/work-dir
+
+  # container chạy spark-submit job streaming
+  spark-job:
+    build: ./spark
+    depends_on: [kafka, spark-master, spark-worker]
+    environment:
+      KAFKA_BOOTSTRAP: kafka:9092
+      TOPIC_FRAMES: camera_frames
+      OUTPUT_DIR: /opt/output
+      CHECKPOINT_DIR: /opt/checkpoints/camera_frames
+
+      # FIX Ivy / user.home
+      HOME: /tmp
+      SPARK_SUBMIT_OPTS: "-Duser.home=/tmp -Divy.home=/tmp/.ivy2"
+    volumes:
+      - ./output:/opt/output
+      - ./checkpoints:/opt/checkpoints
+      - ./ivy-cache:/tmp/.ivy2   # optional nhưng rất tiện: cache lại, chạy lần sau nhanh hơn
+    command:
+      - /opt/spark/bin/spark-submit
+      - --master
+      - spark://spark-master:7077
+      - --conf
+      - spark.jars.ivy=/tmp/.ivy2
+      - --py-files
+      - /opt/app/background_remover.py
+      - --packages
+      - org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1
+      - /opt/app/stream_frames_job.py
+
+
+  camera:
+    build: ./camera
+    depends_on: [kafka]
+    environment:
+      KAFKA_BOOTSTRAP: kafka:9092
+      TOPIC_FRAMES: camera_frames
+      CAMERA_ID: cam01
+      VIDEO_SRC: "/videos/sample.mp4"
+      FPS: "10"
+      JPEG_QUALITY: "80"
+      MAX_WIDTH: "640"
+    volumes:
+      - ./videos:/videos
+    command: ["python", "camera_server.py"]
